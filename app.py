@@ -10,6 +10,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+.stDeployButton {display: none;}
+[data-testid="stToolbar"] {display: none;}
+</style>
+""", unsafe_allow_html=True)
+
 if not is_authenticated():
     render_login()
     st.stop()
