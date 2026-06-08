@@ -17,8 +17,9 @@ GLOBAL_CSS = """
 /* Hide Streamlit auto-generated page nav (replaced by our custom links below) */
 [data-testid="stSidebarNav"] { display: none !important; }
 
-/* Hide toolbar / deploy button / footer — but NOT the sidebar toggle */
-#MainMenu, footer, .stDeployButton { display: none !important; }
+/* Hide toolbar / deploy button / footer */
+#MainMenu, footer, .stDeployButton,
+[data-testid="stToolbar"] { display: none !important; }
 
 /* Always show the sidebar expand/collapse button */
 [data-testid="stSidebarCollapsedControl"] { display: flex !important; visibility: visible !important; }
