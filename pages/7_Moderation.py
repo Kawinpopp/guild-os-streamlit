@@ -1,168 +1,231 @@
 import streamlit as st
 import pandas as pd
-from components.sidebar import render_sidebar
 from utils.supabase_client import get_client
-
-render_sidebar()
-
-st.title("🛡️ Moderation")
-st.caption("ตรวจสอบและจัดการเนื้อหาที่ถูก flag บน GuildOS")
+from components.auth import get_current_user
 
 supabase = get_client()
+user = get_current_user()
 
+
+def get_community():
+    uid = user.get("id")
+    if not uid:
+        return None
+    try:
+        r = supabase.table("communities").select("id, name, platform").eq("admin_auth_id", uid).limit(1).execute()
+        return r.data[0] if r.data else None
+    except Exception:
+        return None
+
+
+community = get_community()
+cid = community["id"] if community else None
+
+# ── Header ────────────────────────────────────────────────────────────────────
+h_col, btn_col = st.columns([5, 1])
+h_col.title("AI Moderation")
+h_col.caption("ตรวจจับและจัดการโพสต์ที่ไม่เหมาะสมด้วย AI")
+if btn_col.button("🔄 Refresh", use_container_width=True):
+    st.rerun()
+
+# ── Fetch all logs ────────────────────────────────────────────────────────────
 try:
-    comm_result = supabase.table("communities").select("id, name").execute()
-    communities = {c["id"]: c["name"] for c in (comm_result.data or [])}
-    community_options = ["all"] + list(communities.values())
-except Exception:
-    communities = {}
-    community_options = ["all"]
-
-# ── KPIs ──────────────────────────────────────────────────────────────────────
-try:
-    all_logs = supabase.table("moderation_logs") \
-        .select("action_taken, label, requires_review") \
-        .execute()
-    logs_data = all_logs.data or []
-except Exception as e:
-    st.warning(f"โหลดข้อมูลไม่ได้: {e}")
-    logs_data = []
-
-c1, c2, c3, c4 = st.columns(4)
-if logs_data:
-    df_kpi   = pd.DataFrame(logs_data)
-    total    = len(df_kpi)
-    needs_rv = len(df_kpi[df_kpi["requires_review"] == True])
-    removed  = len(df_kpi[df_kpi["action_taken"] == "remove"])
-    passed   = len(df_kpi[df_kpi["action_taken"] == "pass"])
-    c1.metric("Total Moderated",  total)
-    c2.metric("🟡 Needs Review",  needs_rv)
-    c3.metric("🔴 Removed",       removed)
-    c4.metric("🟢 Passed",        passed)
-else:
-    c1.metric("Total Moderated", 0)
-
-st.divider()
-
-# ── Filters ───────────────────────────────────────────────────────────────────
-f1, f2, f3 = st.columns(3)
-review_filter = f1.selectbox("Queue",     ["Needs Review", "All", "Reviewed"])
-label_filter  = f2.selectbox("Label",     ["all", "spam", "toxic", "sell_id", "normal"])
-comm_filter   = f3.selectbox("Community", community_options)
-
-# ── Fetch moderation logs with post content ────────────────────────────────────
-try:
-    q = supabase.table("moderation_logs") \
-        .select("id, community_id, post_id, user_id, label, confidence_score, action_taken, requires_review, created_at") \
-        .order("created_at", desc=True) \
-        .limit(200)
-
-    if review_filter == "Needs Review":
-        q = q.eq("requires_review", True)
-    if label_filter != "all":
-        q = q.eq("label", label_filter)
-
-    result = q.execute()
-    logs = result.data or []
+    q = supabase.table("moderation_logs").select(
+        "id, label, confidence_score, action_taken, requires_review, created_at, "
+        "posts(content_preview, is_blocked), users(display_name, platform_type), "
+        "human_reviews(id, decision, reviewed_at)"
+    ).order("created_at", desc=True).limit(200)
+    if cid:
+        q = q.eq("community_id", cid)
+    items = q.execute().data or []
 except Exception as e:
     st.error(f"โหลดข้อมูลไม่ได้: {e}")
-    logs = []
+    items = []
 
-# Fetch existing human_reviews to know which logs are already reviewed
-try:
-    hr_r = supabase.table("human_reviews").select("moderation_log_id, decision").execute()
-    reviewed_map = {h["moderation_log_id"]: h["decision"] for h in (hr_r.data or [])}
-except Exception:
-    reviewed_map = {}
 
-# Fetch post content
-post_ids = list({log["post_id"] for log in logs if log.get("post_id")})
-post_map: dict = {}
-if post_ids:
-    try:
-        posts_r = supabase.table("posts") \
-            .select("id, content_preview, is_blocked") \
-            .in_("id", post_ids[:50]) \
-            .execute()
-        post_map = {p["id"]: p for p in (posts_r.data or [])}
-    except Exception:
-        pass
+def is_reviewed(item):
+    reviews = item.get("human_reviews") or []
+    return bool(reviews) and reviews[0].get("decision") is not None
 
-if comm_filter != "all":
-    logs = [l for l in logs if communities.get(l.get("community_id")) == comm_filter]
-if review_filter == "Reviewed":
-    logs = [l for l in logs if l["id"] in reviewed_map]
 
-if not logs:
-    st.info("ไม่มีรายการในหมวดนี้")
-    st.stop()
+# ── Stats cards ───────────────────────────────────────────────────────────────
+pending_count = sum(1 for i in items if i.get("requires_review") and not is_reviewed(i))
+reviewed_count = sum(1 for i in items if is_reviewed(i))
 
-st.caption(f"แสดง {len(logs)} รายการ")
-st.divider()
+s1, s2, s3 = st.columns(3)
+s1.metric("Needs Review", pending_count)
+s2.metric("Reviewed", reviewed_count)
+s3.metric("Total Flagged", len(items))
 
-# ── Moderation queue ──────────────────────────────────────────────────────────
-LABEL_COLOR  = {"spam": "🔴", "toxic": "🟠", "sell_id": "🟡", "normal": "🟢"}
+# ── Filter tabs ───────────────────────────────────────────────────────────────
+if "mod_filter" not in st.session_state:
+    st.session_state["mod_filter"] = "pending"
+
+tab_labels = [
+    f"Pending Review ({pending_count})" if st.session_state["mod_filter"] == "pending" else "Pending Review",
+    "Reviewed",
+    "All",
+]
+tab_keys = ["pending", "reviewed", "all"]
+
+cols = st.columns(len(tab_keys))
+for i, (col, key, label) in enumerate(zip(cols, tab_keys, tab_labels)):
+    active = st.session_state["mod_filter"] == key
+    if col.button(
+        label,
+        key=f"mod_tab_{key}",
+        use_container_width=True,
+        type="primary" if active else "secondary",
+    ):
+        st.session_state["mod_filter"] = key
+        st.rerun()
+
+filter_val = st.session_state["mod_filter"]
+
+if filter_val == "pending":
+    filtered = [i for i in items if i.get("requires_review") and not is_reviewed(i)]
+elif filter_val == "reviewed":
+    filtered = [i for i in items if is_reviewed(i)]
+else:
+    filtered = items
+
+# ── Detail dialog ─────────────────────────────────────────────────────────────
+LABEL_COLOR = {"spam": "🔴", "toxic": "🟠", "sell_id": "🟡", "normal": "🟢"}
 ACTION_COLOR = {"remove": "🔴", "warn": "🟠", "mute": "🟡", "pass": "🟢"}
 
-for log in logs:
-    log_id     = log.get("id")
-    label      = log.get("label", "?")
-    action     = log.get("action_taken", "?")
-    confidence = log.get("confidence_score", 0) or 0
-    community  = communities.get(log.get("community_id"), "—")
-    post       = post_map.get(log.get("post_id"), {})
-    content    = post.get("content_preview", "— (ไม่มี content) —")
-    is_blocked = post.get("is_blocked", False)
-    decision   = reviewed_map.get(log_id)
 
-    label_icon  = LABEL_COLOR.get(label, "⚪")
-    action_icon = ACTION_COLOR.get(action, "⚪")
-    reviewed_badge = f"  ✅ Reviewed: {decision}" if decision else ""
+@st.dialog("Post Detail", width="large")
+def show_detail(item):
+    users_data = item.get("users") or {}
+    posts_data = item.get("posts") or {}
+    reviews = item.get("human_reviews") or []
+    reviewed = bool(reviews) and reviews[0].get("decision") is not None
 
-    with st.expander(f"{label_icon} [{label.upper()}]  {action_icon} {action}  ·  {community}  ·  {confidence:.0%}{reviewed_badge}"):
-        st.markdown("**เนื้อหา:**")
-        st.code(content or "—", language=None)
+    st.markdown(f"**Author:** {users_data.get('display_name', '—')}")
+    st.markdown("**Content:**")
+    st.code(posts_data.get("content_preview") or "—", language=None)
 
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("Label",      label)
-        mc2.metric("Action",     action)
-        mc3.metric("Confidence", f"{confidence:.0%}")
+    col1, col2 = st.columns(2)
+    col1.markdown(f"**Platform:** {users_data.get('platform_type', '—')}")
+    col2.markdown(f"**Label:** {item.get('label', '—')}")
 
-        if decision:
-            st.success(f"Human review: **{decision}**")
-        elif log.get("requires_review"):
-            bc1, bc2 = st.columns(2)
-            if bc1.button("✅ Confirm AI decision", key=f"confirm_{log_id}", use_container_width=True):
+    score = item.get("confidence_score", 0) or 0
+    col3, col4 = st.columns(2)
+    col3.markdown(f"**AI Score:** {score:.0%}")
+    col4.markdown(f"**AI Action:** {item.get('action_taken', '—')}")
+
+    if reviewed:
+        st.success(f"Human Decision: **{reviews[0]['decision']}**")
+    elif item.get("requires_review"):
+        st.divider()
+        bc1, bc2, bc3 = st.columns(3)
+        if bc1.button("✅ Confirm AI", key=f"dlg_confirm_{item['id']}", use_container_width=True):
+            try:
+                supabase.table("human_reviews").insert({
+                    "moderation_log_id": item["id"],
+                    "decision": "confirm",
+                    "reviewed_at": pd.Timestamp.now().isoformat(),
+                }).execute()
+                st.success("ยืนยันการดำเนินการแล้ว")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        if bc2.button("🔄 Ignore", key=f"dlg_ignore_{item['id']}", use_container_width=True):
+            try:
+                supabase.table("human_reviews").insert({
+                    "moderation_log_id": item["id"],
+                    "decision": "ignore",
+                    "reviewed_at": pd.Timestamp.now().isoformat(),
+                }).execute()
+                st.success("ข้ามแล้ว")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        if bc3.button("❌ Override", key=f"dlg_override_{item['id']}", use_container_width=True):
+            try:
+                supabase.table("human_reviews").insert({
+                    "moderation_log_id": item["id"],
+                    "decision": "override",
+                    "reviewed_at": pd.Timestamp.now().isoformat(),
+                }).execute()
+                st.success("Override แล้ว")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+
+# ── Items list ────────────────────────────────────────────────────────────────
+if not filtered:
+    st.info("✅ ไม่มีโพสต์ที่ต้องดำเนินการ")
+    st.stop()
+
+st.caption(f"แสดง {len(filtered)} รายการ")
+
+for item in filtered:
+    item_id = item.get("id", "")
+    label = item.get("label", "?")
+    action = item.get("action_taken", "?")
+    score = item.get("confidence_score", 0) or 0
+    users_data = item.get("users") or {}
+    posts_data = item.get("posts") or {}
+    reviews = item.get("human_reviews") or []
+    reviewed = bool(reviews) and reviews[0].get("decision") is not None
+
+    display_name = users_data.get("display_name", "—")
+    platform_type = users_data.get("platform_type", "—")
+    content_preview = posts_data.get("content_preview", "—")
+    ts = item.get("created_at", "")
+    try:
+        ts_display = pd.Timestamp(ts).strftime("%d %b %H:%M") if ts else "—"
+    except Exception:
+        ts_display = ts[:16]
+
+    l_icon = LABEL_COLOR.get(label, "⚪")
+    a_icon = ACTION_COLOR.get(action, "⚪")
+
+    with st.container(border=True):
+        row1, row_score = st.columns([6, 1])
+        with row1:
+            badge_parts = [
+                f"**{display_name}**",
+                f"`{platform_type}`",
+                f"{l_icon} {label}",
+                f"{a_icon} AI: {action}",
+            ]
+            if reviewed:
+                badge_parts.append(f"✅ {reviews[0]['decision']}")
+            st.markdown("  ·  ".join(badge_parts))
+            st.caption(f"{content_preview[:120]}{'…' if len(content_preview or '') > 120 else ''}")
+            st.caption(ts_display)
+        with row_score:
+            score_pct = int(score * 100)
+            color = "🔴" if score >= 0.85 else "🟠" if score >= 0.6 else "⚪"
+            st.metric(f"{color} Score", score_pct)
+
+        btn_cols = st.columns([1, 2, 2, 4])
+        if btn_cols[0].button("👁", key=f"view_{item_id}", help="ดูเนื้อหา"):
+            show_detail(item)
+
+        if item.get("requires_review") and not reviewed:
+            if btn_cols[1].button("✅ Confirm", key=f"confirm_{item_id}", use_container_width=True):
                 try:
                     supabase.table("human_reviews").insert({
-                        "moderation_log_id": log_id,
+                        "moderation_log_id": item_id,
                         "decision": "confirm",
+                        "reviewed_at": pd.Timestamp.now().isoformat(),
                     }).execute()
-                    st.success("Confirmed!")
+                    st.success("ยืนยันแล้ว")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error: {e}")
-
-            if bc2.button("🔄 Override (let through)", key=f"override_{log_id}", use_container_width=True):
+                    st.error(str(e))
+            if btn_cols[2].button("❌ Override", key=f"override_{item_id}", use_container_width=True):
                 try:
                     supabase.table("human_reviews").insert({
-                        "moderation_log_id": log_id,
+                        "moderation_log_id": item_id,
                         "decision": "override",
+                        "reviewed_at": pd.Timestamp.now().isoformat(),
                     }).execute()
-                    if post.get("id"):
-                        supabase.table("posts").update({"is_blocked": False}).eq("id", post["id"]).execute()
-                    st.success("Overridden — post unblocked!")
+                    st.success("Override แล้ว")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error: {e}")
-
-st.divider()
-
-# ── Label breakdown chart ─────────────────────────────────────────────────────
-st.subheader("📊 Label Breakdown")
-if logs_data:
-    df_chart = pd.DataFrame(logs_data)
-    if "label" in df_chart.columns:
-        label_counts = df_chart["label"].value_counts().reset_index()
-        label_counts.columns = ["Label", "Count"]
-        st.bar_chart(label_counts.set_index("Label"))
+                    st.error(str(e))

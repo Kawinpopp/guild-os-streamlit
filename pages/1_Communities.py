@@ -1,9 +1,6 @@
 import streamlit as st
 import pandas as pd
-from components.sidebar import render_sidebar
 from utils.supabase_client import get_client
-
-render_sidebar()
 
 st.title("🏰 Communities")
 st.caption("รายละเอียดทุก community บน GuildOS")

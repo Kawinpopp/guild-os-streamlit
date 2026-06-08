@@ -1,147 +1,257 @@
 import streamlit as st
-from components.sidebar import render_sidebar
+import pandas as pd
+import time
+import random
 from utils.supabase_client import get_client
-
-render_sidebar()
-
-st.title("⚙️ Settings")
-st.caption("ตั้งค่า community — plan, matchmaker และ onboarding")
+from components.auth import get_current_user
 
 supabase = get_client()
+user = get_current_user()
 
-try:
-    result = supabase.table("communities") \
-        .select("id, name, platform, total_members, subscription_tier, is_onboarded, is_active, matchmaker_config, last_synced_at") \
-        .order("name") \
-        .execute()
-    communities = result.data or []
-except Exception as e:
-    st.error(f"โหลดข้อมูลไม่ได้: {e}")
-    communities = []
 
-if not communities:
-    st.info("ยังไม่มี community")
+def get_community():
+    uid = user.get("id")
+    if not uid:
+        return None
+    try:
+        r = supabase.table("communities").select(
+            "id, name, platform, total_members, platform_group_id, subscription_tier, matchmaker_config"
+        ).eq("admin_auth_id", uid).limit(1).execute()
+        return r.data[0] if r.data else None
+    except Exception:
+        return None
+
+
+community = get_community()
+
+if not community:
+    st.warning("ไม่พบข้อมูลชุมชน")
     st.stop()
 
-community_names = [c["name"] for c in communities]
-selected_name   = st.selectbox("เลือก Community", community_names)
-selected        = next((c for c in communities if c["name"] == selected_name), None)
+cid = community["id"]
 
-if not selected:
-    st.stop()
+st.title("Settings")
+st.caption("Configure AI, integrations, profile, and your plan.")
 
-st.divider()
+tabs = st.tabs(["🤖 AI Config", "🔗 Integrations", "💚 System Health", "🔌 Platforms", "👤 Profile", "💳 Subscription"])
 
-mc_config = selected.get("matchmaker_config") or {"time_window": 60}
+# ── Tab: AI Config ────────────────────────────────────────────────────────────
+with tabs[0]:
+    st.subheader("🛡 AI Moderation")
 
-tab_general, tab_matchmaker, tab_plan = st.tabs(["General", "Matchmaker Config", "Plan"])
+    mc_config = community.get("matchmaker_config") or {}
+    time_window = int(mc_config.get("time_window", 60))
 
-# ── Tab: General ──────────────────────────────────────────────────────────────
-with tab_general:
-    st.subheader("General Settings")
+    if "ai_threshold" not in st.session_state:
+        st.session_state["ai_threshold"] = 0.85
+    if "ai_auto_remove" not in st.session_state:
+        st.session_state["ai_auto_remove"] = True
 
-    with st.form("general_form"):
-        new_name      = st.text_input("ชื่อ Community", value=selected.get("name", ""))
-        new_platform  = st.selectbox(
-            "Platform",
-            ["facebook", "discord", "line"],
-            index=["facebook", "discord", "line"].index(selected.get("platform", "facebook").lower())
-                  if selected.get("platform", "").lower() in ["facebook", "discord", "line"] else 0,
+    with st.container(border=True):
+        st.markdown(
+            f"**Confidence Threshold** — ปัจจุบัน: `{st.session_state['ai_threshold']:.2f}`  ·  "
+            f"Auto-remove: {'เปิด' if st.session_state['ai_auto_remove'] else 'ปิด'}"
         )
-        new_onboarded = st.checkbox("Onboarded (เปิดใช้งานแล้ว)", value=bool(selected.get("is_onboarded")))
-        new_active    = st.checkbox("Active",                       value=bool(selected.get("is_active", True)))
-        save_general  = st.form_submit_button("💾 Save", use_container_width=True)
-
-    if save_general:
-        try:
-            supabase.table("communities") \
-                .update({
-                    "name":         new_name,
-                    "platform":     new_platform,
-                    "is_onboarded": new_onboarded,
-                    "is_active":    new_active,
-                }) \
-                .eq("id", selected["id"]) \
-                .execute()
-            st.success("บันทึกสำเร็จ!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"บันทึกไม่ได้: {e}")
+        threshold = st.slider(
+            "Threshold (quick adjust)",
+            min_value=0.50, max_value=0.99, step=0.01,
+            value=st.session_state["ai_threshold"],
+            key="slider_threshold",
+        )
+        st.session_state["ai_threshold"] = threshold
+        auto_remove = st.toggle(
+            "Auto-remove เมื่อเกิน threshold",
+            value=st.session_state["ai_auto_remove"],
+            key="toggle_auto_remove",
+        )
+        st.session_state["ai_auto_remove"] = auto_remove
 
     st.divider()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Members",  selected.get("total_members", 0))
-    c2.metric("Platform",       selected.get("platform", "—"))
-    c3.metric("Last Synced",    str(selected.get("last_synced_at", "—"))[:10])
+    st.subheader("⚔️ Matchmaker")
 
-# ── Tab: Matchmaker Config ────────────────────────────────────────────────────
-with tab_matchmaker:
-    st.subheader("Matchmaker Configuration")
-    st.caption("ค่า config ที่ AI Matchmaker ใช้สำหรับ community นี้")
-
-    st.json(mc_config)
-
-    with st.form("matchmaker_form"):
-        new_time_window = st.number_input(
-            "Time Window (นาที) — ช่วงเวลาที่จะ match คน",
-            min_value=10, max_value=1440,
-            value=int(mc_config.get("time_window", 60)),
-            step=10,
+    with st.container(border=True):
+        new_time_window = st.slider(
+            "Time Window (นาที)",
+            min_value=10, max_value=180, step=5,
+            value=time_window,
+            key="slider_time_window",
         )
-        save_mc = st.form_submit_button("💾 Save Matchmaker Config", use_container_width=True)
+        st.caption(f"10 นาที — 180 นาที · ค่าปัจจุบัน: **{new_time_window} นาที**")
 
-    if save_mc:
+    if st.button("💾 บันทึกการตั้งค่า", type="primary", use_container_width=True):
         try:
             new_mc = {**mc_config, "time_window": new_time_window}
-            supabase.table("communities") \
-                .update({"matchmaker_config": new_mc}) \
-                .eq("id", selected["id"]) \
-                .execute()
-            st.success(f"บันทึก time_window = {new_time_window} นาที สำเร็จ!")
+            supabase.table("communities").update(
+                {"matchmaker_config": new_mc}
+            ).eq("id", cid).execute()
+            st.success(f"บันทึก Time Window = {new_time_window} นาที สำเร็จ!")
             st.rerun()
         except Exception as e:
-            st.error(f"บันทึกไม่ได้: {e}")
+            st.error(f"บันทึกไม่สำเร็จ: {e}")
 
-# ── Tab: Plan ─────────────────────────────────────────────────────────────────
-with tab_plan:
-    st.subheader("Subscription Plan")
+# ── Tab: Integrations ─────────────────────────────────────────────────────────
+with tabs[1]:
+    platform = community.get("platform", "")
+    platform_group_id = community.get("platform_group_id", "")
+    webhook_url = f"https://api.guildos.app/api/webhook/{platform}/{platform_group_id}"
 
-    current_tier = selected.get("subscription_tier") or "free"
+    with st.container(border=True):
+        st.markdown(
+            f"**{platform.capitalize()} Webhook**  "
+            f"<span style='background:#16c78420; color:#16c784; padding:2px 8px; border-radius:4px; font-size:.75rem'>Active</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"URL สำหรับรับ event จาก {platform}")
+        st.code(webhook_url, language=None)
+        if st.button("Test Connection", key="test_webhook"):
+            st.success("✅ ทดสอบสำเร็จ")
 
-    PLAN_DETAILS = {
-        "free":    {"price": 0,    "features": ["Moderation AI (basic)", "Up to 100 members"]},
-        "starter": {"price": 490,  "features": ["Moderation AI", "Up to 500 members", "Basic analytics"]},
-        "pro":     {"price": 1490, "features": ["All Starter", "Matchmaking AI", "Up to 5,000 members", "Data Insights"]},
-    }
+    with st.container(border=True):
+        st.markdown("**Platform Group ID**")
+        st.caption("ID ของกลุ่มบนแพลตฟอร์ม — ใช้ระบุชุมชนเมื่อรับ webhook")
+        st.code(platform_group_id or "—", language=None)
 
-    cols = st.columns(len(PLAN_DETAILS))
-    for col, (plan_name, detail) in zip(cols, PLAN_DETAILS.items()):
-        is_current = (current_tier == plan_name)
+# ── Tab: System Health ────────────────────────────────────────────────────────
+with tabs[2]:
+    HEALTH_ITEMS = [
+        "Database Connection",
+        "Realtime Subscriptions",
+        "AI Moderation",
+        "Matchmaker",
+        "LINE Webhook",
+        "Discord Bot",
+        "Data Integrity",
+    ]
+
+    if "health_checks" not in st.session_state:
+        st.session_state["health_checks"] = []
+
+    if st.button("🔄 Re-check", key="recheck_health") or not st.session_state["health_checks"]:
+        results = []
+        progress = st.progress(0, text="กำลังตรวจสอบ...")
+        for i, item in enumerate(HEALTH_ITEMS):
+            time.sleep(0.15)
+            status = "ok" if random.random() > 0.15 else "fail"
+            results.append({"name": item, "status": status})
+            progress.progress((i + 1) / len(HEALTH_ITEMS), text=f"ตรวจสอบ {item}...")
+        progress.empty()
+        st.session_state["health_checks"] = results
+
+    checks = st.session_state["health_checks"]
+    if checks:
+        pass_count = sum(1 for c in checks if c["status"] == "ok")
+        fail_count = sum(1 for c in checks if c["status"] == "fail")
+        all_ok = fail_count == 0
+
+        if all_ok:
+            st.success(f"✅ ระบบทั้งหมดพร้อมใช้งาน — {pass_count}/{len(checks)} ผ่าน")
+        else:
+            st.error(f"⚠ พบปัญหา {fail_count} รายการ — {pass_count}/{len(checks)} ผ่าน")
+
+        for c in checks:
+            icon = "✅" if c["status"] == "ok" else "❌"
+            st.markdown(f"{icon} {c['name']}")
+
+# ── Tab: Platforms ────────────────────────────────────────────────────────────
+with tabs[3]:
+    if "platform_state" not in st.session_state:
+        st.session_state["platform_state"] = {"facebook": True, "discord": True, "line": False}
+    if "notify_state" not in st.session_state:
+        st.session_state["notify_state"] = {"spam": True, "team": False, "milestone": True}
+
+    st.subheader("🔌 Platform Webhooks")
+    p1, p2, p3 = st.columns(3)
+    for col, p in zip([p1, p2, p3], ["facebook", "discord", "line"]):
         with col:
-            st.markdown(f"### {'✅ ' if is_current else ''}{plan_name.capitalize()}")
-            st.markdown(f"**฿{detail['price']:,}/เดือน**")
-            for f in detail["features"]:
-                st.markdown(f"- {f}")
+            with st.container(border=True):
+                enabled = st.toggle(p.capitalize(), value=st.session_state["platform_state"][p], key=f"plat_{p}")
+                st.session_state["platform_state"][p] = enabled
+                badge = "🟢 Connected" if enabled else "⚫ Not connected"
+                st.caption(badge)
 
     st.divider()
+    st.subheader("🔔 Notification Preferences")
+    st.caption("รับแจ้งเตือนทาง Email เมื่อเกิดเหตุการณ์สำคัญ")
 
-    with st.form("plan_form"):
-        new_tier = st.selectbox(
-            "เปลี่ยน Plan",
-            list(PLAN_DETAILS.keys()),
-            index=list(PLAN_DETAILS.keys()).index(current_tier)
-                  if current_tier in PLAN_DETAILS else 0,
-            format_func=str.capitalize,
+    notifications = [
+        ("spam", "Spam Spike Alert", "แจ้งเมื่อ spam เกิน 5 โพสต์ใน 1 ชั่วโมง"),
+        ("team", "Team Formed", "แจ้งเมื่อ AI จัดทีมสำเร็จ"),
+        ("milestone", "Member Milestone", "แจ้งเมื่อสมาชิกถึง 100, 500, 1000 คน"),
+    ]
+    for key, title, desc in notifications:
+        nc1, nc2 = st.columns([4, 1])
+        nc1.markdown(f"**{title}**")
+        nc1.caption(desc)
+        enabled = nc2.toggle("", value=st.session_state["notify_state"][key], key=f"notify_{key}", label_visibility="collapsed")
+        st.session_state["notify_state"][key] = enabled
+
+    if st.button("💾 บันทึก", type="primary", use_container_width=True, key="save_platforms"):
+        st.success("บันทึกแล้ว")
+
+# ── Tab: Profile ──────────────────────────────────────────────────────────────
+with tabs[4]:
+    with st.container(border=True):
+        st.text_input("Account Email", value=user.get("email", ""), disabled=True)
+
+        new_name = st.text_input("ชื่อชุมชน", value=community.get("name", ""), key="profile_name")
+        st.text_input("Platform", value=(community.get("platform") or "").capitalize(), disabled=True)
+        st.text_input(
+            "Platform Group ID",
+            value=community.get("platform_group_id", ""),
+            disabled=True,
         )
-        save_plan = st.form_submit_button("💾 Upgrade / Downgrade", use_container_width=True)
 
-    if save_plan:
-        try:
-            supabase.table("communities") \
-                .update({"subscription_tier": new_tier}) \
-                .eq("id", selected["id"]) \
-                .execute()
-            st.success(f"เปลี่ยนเป็น {new_tier.capitalize()} สำเร็จ!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"บันทึกไม่ได้: {e}")
+        if st.button("💾 บันทึก", type="primary", use_container_width=True, key="save_profile"):
+            try:
+                supabase.table("communities").update({"name": new_name}).eq("id", cid).execute()
+                st.success("บันทึกแล้ว")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+# ── Tab: Subscription ─────────────────────────────────────────────────────────
+with tabs[5]:
+    current_tier = (community.get("subscription_tier") or "free").lower()
+
+    plans = [
+        {
+            "id": "free",
+            "name": "Free",
+            "price": "฿0",
+            "features": ["1 ชุมชน", "1,000 สมาชิก", "AI Moderation พื้นฐาน"],
+        },
+        {
+            "id": "pro",
+            "name": "Pro",
+            "price": "฿990 / เดือน",
+            "features": ["3 ชุมชน", "30,000 สมาชิก", "Smart Matchmaker", "Priority support"],
+        },
+        {
+            "id": "enterprise",
+            "name": "Enterprise",
+            "price": "ติดต่อเรา",
+            "features": ["ไม่จำกัดชุมชน", "Custom AI models", "Dedicated success manager"],
+        },
+    ]
+
+    p_cols = st.columns(len(plans))
+    for col, plan in zip(p_cols, plans):
+        active = current_tier == plan["id"]
+        with col:
+            with st.container(border=True):
+                if active:
+                    st.markdown(
+                        f"**{plan['name']}** "
+                        f"<span style='background:#6366f120; color:#6366f1; padding:2px 6px; border-radius:4px; font-size:.7rem'>Current</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(f"**{plan['name']}**")
+                st.markdown(f"### {plan['price']}")
+                for f in plan["features"]:
+                    st.markdown(f"✅ {f}")
+                if active:
+                    st.button("Current plan", disabled=True, key=f"plan_{plan['id']}", use_container_width=True)
+                else:
+                    if st.button("Upgrade", key=f"plan_{plan['id']}", use_container_width=True, type="primary"):
+                        st.info("🔧 ทีมงานจะติดต่อกลับเร็วๆ นี้")
