@@ -1,7 +1,7 @@
 import streamlit as st
-from components.auth import require_auth
+from components.sidebar import render_sidebar
 
-require_auth()
+render_sidebar()
 
 st.title("🤖 AI Lab")
 st.caption("ทดสอบและ tune AI agents ทั้ง 3 ตัว")

@@ -1,14 +1,47 @@
 import streamlit as st
 import anthropic
+import httpx
 import json
 
+
+# ── External AI API (guild-os-ai) ─────────────────────────────────────────────
+# If AI_API_URL is set in secrets, calls are routed through the FastAPI service.
+# Otherwise falls back to calling Anthropic directly.
 
 @st.cache_resource
 def get_ai_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
 
+def _call_ai_api(endpoint: str, payload: dict) -> dict | None:
+    url    = st.secrets.get("AI_API_URL", "")
+    secret = st.secrets.get("AI_BOT_SECRET", "")
+    if not url:
+        return None
+    try:
+        r = httpx.post(
+            f"{url.rstrip('/')}/{endpoint}",
+            json=payload,
+            headers={"x-bot-secret": secret},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data if data else None
+    except Exception:
+        return None
+
+
+# ── Onboarding / Profiler ─────────────────────────────────────────────────────
 def run_onboarding_ai(name: str, game: str, role: str, playtime: str) -> dict:
+    # Route 1: guild-os-ai FastAPI → POST /onboarding
+    result = _call_ai_api("onboarding", {
+        "name": name, "game": game, "role": role, "playtime": playtime
+    })
+    if result:
+        return result
+
+    # Route 2: Direct Anthropic call (fallback)
     client = get_ai_client()
     prompt = f"""
 คุณคือ AI Profiling Engine ของ GuildOS สร้าง Skill Card JSON สำหรับสมาชิกใหม่
@@ -38,7 +71,14 @@ def run_onboarding_ai(name: str, game: str, role: str, playtime: str) -> dict:
     return _parse_json(message.content[0].text)
 
 
+# ── Matchmaker ────────────────────────────────────────────────────────────────
 def run_matchmaker(request: str, game: str) -> dict:
+    # Route 1: guild-os-ai FastAPI → POST /match
+    result = _call_ai_api("match", {"request": request, "game": game})
+    if result:
+        return result
+
+    # Route 2: Direct Anthropic call (fallback)
     client = get_ai_client()
     prompt = f"""
 คุณคือ Smart Matchmaker AI ของ GuildOS วิเคราะห์คำขอหาทีม:
@@ -78,7 +118,14 @@ def run_matchmaker(request: str, game: str) -> dict:
     return result
 
 
+# ── Moderator ─────────────────────────────────────────────────────────────────
 def run_moderator(content: str, threshold: float = 0.7) -> dict:
+    # Route 1: guild-os-ai FastAPI → POST /moderate
+    result = _call_ai_api("moderate", {"content": content, "threshold": threshold})
+    if result:
+        return result
+
+    # Route 2: Direct Anthropic call (fallback)
     client = get_ai_client()
     prompt = f"""
 คุณคือ AI Moderator ของ GuildOS ตรวจสอบเนื้อหานี้:

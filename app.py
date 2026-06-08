@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from components.auth import render_login, is_authenticated, get_current_user, logout
+from components.sidebar import render_sidebar
 from utils.supabase_client import get_client
 
 st.set_page_config(
@@ -10,128 +10,149 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-.stDeployButton {display: none;}
-[data-testid="stToolbar"] {display: none;}
-</style>
-""", unsafe_allow_html=True)
-
-if not is_authenticated():
-    render_login()
-    st.stop()
-
-user = get_current_user()
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.markdown("### ⚔️ GuildOS Internal")
-st.sidebar.caption(f"Staff: {user.get('email', '')}")
-st.sidebar.divider()
-st.sidebar.page_link("app.py",                       label="Global Overview",  icon="🌐")
-st.sidebar.page_link("pages/1_Communities.py",        label="Communities",      icon="🏰")
-st.sidebar.page_link("pages/2_Data_Insights.py",      label="Data Insights",    icon="📊")
-st.sidebar.page_link("pages/3_AI_Lab.py",             label="AI Lab",           icon="🤖")
-st.sidebar.page_link("pages/4_System.py",             label="System Health",    icon="🔧")
-st.sidebar.divider()
-if st.sidebar.button("Logout", use_container_width=True):
-    logout()
-    st.rerun()
-
-# ── Global Overview ───────────────────────────────────────────────────────────
-st.title("🌐 Global Overview")
-st.caption("ภาพรวมทุก community บน GuildOS")
+render_sidebar()  # handles auth — shows login/register if not authenticated
 
 supabase = get_client()
+today = pd.Timestamp.now().normalize().isoformat()
 
-# ── KPIs across ALL communities ───────────────────────────────────────────────
+# ── KPIs (matches Next.js: Active Members, Posts Today, Spam Blocked, Matches Today) ──
+st.title("🌐 Overview")
+
 try:
-    communities = supabase.table("communities").select("id", count="exact").execute()
-    community_count = communities.count or 0
+    active_members = supabase.table("community_members") \
+        .select("id", count="exact").eq("is_active", True).execute()
+    m_count = active_members.count or 0
 except Exception:
-    community_count = 0
+    m_count = 0
 
 try:
-    members = supabase.table("members").select("id", count="exact").execute()
-    member_count = members.count or 0
+    posts_today = supabase.table("posts") \
+        .select("id", count="exact").gte("created_at", today).execute()
+    p_count = posts_today.count or 0
 except Exception:
-    member_count = 0
+    p_count = 0
 
 try:
-    today = pd.Timestamp.now().normalize().isoformat()
-    spam = supabase.table("flagged_posts") \
+    spam_today = supabase.table("moderation_logs") \
         .select("id", count="exact") \
-        .eq("status", "removed") \
+        .eq("action_taken", "remove") \
         .gte("created_at", today).execute()
-    spam_count = spam.count or 0
+    s_count = spam_today.count or 0
 except Exception:
-    spam_count = 0
+    s_count = 0
 
 try:
-    matches = supabase.table("teams").select("id", count="exact").execute()
-    team_count = matches.count or 0
+    matches_today = supabase.table("matches") \
+        .select("id", count="exact").gte("requested_at", today).execute()
+    mx_count = matches_today.count or 0
 except Exception:
-    team_count = 0
+    mx_count = 0
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Communities", community_count)
-col2.metric("Total Members", f"{member_count:,}")
-col3.metric("Spam Removed Today", spam_count)
-col4.metric("Teams Formed (All time)", team_count)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("👥 Active Members",    f"{m_count:,}")
+c2.metric("📝 Posts Today",       p_count)
+c3.metric("🚫 Spam Blocked",      s_count)
+c4.metric("🎮 Matches Today",     mx_count)
 
 st.divider()
 
-# ── Community health table ────────────────────────────────────────────────────
-st.subheader("Community Health")
+# ── Recent moderation activity feed (matches Next.js real-time feed) ──────────
+col_left, col_right = st.columns([3, 2])
 
+with col_left:
+    st.subheader("🛡️ Recent Moderation Activity")
+
+    ACTION_ICON = {"remove": "🗑️", "warn": "⚠️", "mute": "🔇", "pass": "✅"}
+    LABEL_COLOR = {"spam": "🔴", "toxic": "🟠", "sell_id": "🟡", "normal": "🟢"}
+
+    try:
+        activity = supabase.table("moderation_logs") \
+            .select("label, action_taken, confidence_score, created_at, community_id") \
+            .order("created_at", desc=True) \
+            .limit(20).execute()
+
+        if activity.data:
+            # Fetch community names
+            comm_r = supabase.table("communities").select("id, name").execute()
+            comm_map = {c["id"]: c["name"] for c in (comm_r.data or [])}
+
+            for log in activity.data:
+                label      = log.get("label", "?")
+                action     = log.get("action_taken", "?")
+                confidence = log.get("confidence_score", 0) or 0
+                comm_name  = comm_map.get(log.get("community_id"), "—")
+                ts         = log.get("created_at", "")[:16].replace("T", " ")
+                a_icon     = ACTION_ICON.get(action, "•")
+                l_icon     = LABEL_COLOR.get(label, "⚪")
+
+                st.markdown(
+                    f"{a_icon} &nbsp; {l_icon} **{label}** — `{action}` &nbsp; "
+                    f"<span style='color:#888;font-size:.85em'>{comm_name} · {ts} · {confidence:.0%}</span>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("ยังไม่มี moderation activity")
+    except Exception as e:
+        st.warning(f"โหลดไม่ได้: {e}")
+
+with col_right:
+    st.subheader("🏰 Communities")
+
+    try:
+        comm_list = supabase.table("communities") \
+            .select("name, platform, total_members, is_onboarded, subscription_tier") \
+            .order("total_members", desc=True).execute()
+
+        if comm_list.data:
+            PLAT_ICON = {"facebook": "📘", "discord": "💬", "line": "💚"}
+            for c in comm_list.data:
+                platform = (c.get("platform") or "").lower()
+                icon     = PLAT_ICON.get(platform, "🏰")
+                status   = "🟢" if c.get("is_onboarded") else "🟡"
+                tier     = (c.get("subscription_tier") or "free").capitalize()
+                members  = c.get("total_members", 0) or 0
+
+                st.markdown(
+                    f"{icon} **{c['name']}** {status} &nbsp;"
+                    f"<span style='color:#888;font-size:.85em'>{tier} · {members:,} members</span>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("ยังไม่มี community")
+    except Exception as e:
+        st.warning(f"โหลดไม่ได้: {e}")
+
+st.divider()
+
+# ── Match score breakdown ─────────────────────────────────────────────────────
+st.subheader("🎮 Recent Matches")
 try:
-    result = supabase.table("communities") \
-        .select("name, platform, member_count, onboarded, created_at") \
-        .order("member_count", desc=True) \
-        .execute()
+    mx_r = supabase.table("matches") \
+        .select("game, match_score, game_score, time_score, role_score, style_score, status, requested_at") \
+        .order("requested_at", desc=True).limit(10).execute()
 
-    if result.data:
-        df = pd.DataFrame(result.data)
-        df["onboarded"] = df["onboarded"].apply(lambda x: "🟢 Active" if x else "🟡 Pending")
+    if mx_r.data:
+        df_mx = pd.DataFrame(mx_r.data)
+        df_mx["requested_at"] = pd.to_datetime(df_mx["requested_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        STATUS_ICON = {"pending": "🟡", "accepted": "🟢", "rejected": "🔴", "expired": "⚫"}
+        df_mx["สถานะ"] = df_mx["status"].map(lambda s: f"{STATUS_ICON.get(s,'⚪')} {s}")
+
         st.dataframe(
-            df,
+            df_mx[["game", "สถานะ", "match_score", "game_score", "time_score", "role_score", "style_score", "requested_at"]],
             use_container_width=True,
             hide_index=True,
             column_config={
-                "name":         st.column_config.TextColumn("Community"),
-                "platform":     st.column_config.TextColumn("Platform"),
-                "member_count": st.column_config.NumberColumn("Members"),
-                "onboarded":    st.column_config.TextColumn("Status"),
-                "created_at":   st.column_config.DatetimeColumn("Joined"),
+                "game":        st.column_config.TextColumn("เกม"),
+                "สถานะ":       st.column_config.TextColumn("สถานะ"),
+                "match_score": st.column_config.ProgressColumn("Overall", min_value=0, max_value=1, format="%.2f"),
+                "game_score":  st.column_config.NumberColumn("Game",  format="%.2f"),
+                "time_score":  st.column_config.NumberColumn("Time",  format="%.2f"),
+                "role_score":  st.column_config.NumberColumn("Role",  format="%.2f"),
+                "style_score": st.column_config.NumberColumn("Style", format="%.2f"),
+                "requested_at":st.column_config.TextColumn("เวลา"),
             },
         )
     else:
-        st.info("ยังไม่มี community")
+        st.info("ยังไม่มี matches")
 except Exception as e:
-    st.warning(f"โหลดข้อมูลไม่ได้: {e}")
-
-st.divider()
-
-# ── Revenue estimate ──────────────────────────────────────────────────────────
-st.subheader("Revenue Estimate (MRR)")
-try:
-    plans = supabase.table("communities") \
-        .select("settings") \
-        .execute()
-
-    starter = pro = enterprise = 0
-    for row in (plans.data or []):
-        plan = (row.get("settings") or {}).get("plan", "Starter")
-        if plan == "Starter":    starter += 1
-        elif plan == "Pro":      pro += 1
-        elif plan == "Enterprise": enterprise += 1
-
-    mrr = (starter * 490) + (pro * 1490) + (enterprise * 2990)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Starter",    starter,    f"฿{starter * 490:,}/mo")
-    c2.metric("Pro",        pro,        f"฿{pro * 1490:,}/mo")
-    c3.metric("Enterprise", enterprise, f"฿{enterprise * 2990:,}/mo")
-    c4.metric("Total MRR",  "",         f"฿{mrr:,}")
-except Exception as e:
-    st.warning(f"โหลดข้อมูลไม่ได้: {e}")
+    st.warning(f"โหลดไม่ได้: {e}")
