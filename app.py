@@ -1,6 +1,7 @@
 import streamlit as st
 from components.auth import is_authenticated, _render_auth_page, get_current_user, logout
 from utils.supabase_client import get_client
+from utils.community import get_community
 
 st.set_page_config(
     page_title="GuildOS",
@@ -12,6 +13,30 @@ st.set_page_config(
 if not is_authenticated():
     _render_auth_page()
     st.stop()
+
+# ── Onboarding gate ────────────────────────────────────────────────────────────
+# Skip if we just completed onboarding this session
+if not st.session_state.get("_onboarding_done"):
+    try:
+        _supabase = get_client()
+        _uid = get_current_user().get("id")
+        if _uid:
+            import time as _time
+            _cache_key = f"_comm_cache_{_uid}"
+            _cache_ts_key = f"_comm_cache_{_uid}_ts"
+            _now = _time.time()
+            # Cache community record for 60 s to avoid a DB hit on every page
+            if _cache_key not in st.session_state or (_now - st.session_state.get(_cache_ts_key, 0)) > 60:
+                _comm = _supabase.table("communities").select("id, is_onboarded").eq("admin_auth_id", _uid).limit(1).execute()
+                st.session_state[_cache_key] = _comm.data[0] if _comm.data else None
+                st.session_state[_cache_ts_key] = _now
+            _comm_row = st.session_state[_cache_key]
+            if _comm_row and not _comm_row.get("is_onboarded", True):
+                from components.onboarding import render_onboarding
+                render_onboarding()
+                st.stop()
+    except Exception:
+        pass
 
 overview_page       = st.Page("pages/overview.py",       title="Overview",      icon="🌐", default=True)
 moderation_page     = st.Page("pages/7_Moderation.py",   title="Moderation",    icon="🛡️")
@@ -49,20 +74,16 @@ st.markdown("""
 
 with st.sidebar:
     st.divider()
-    try:
-        supabase = get_client()
-        user = get_current_user()
-        uid = user.get("id")
-        comm_r = supabase.table("communities").select("name, platform, total_members").eq("admin_auth_id", uid).limit(1).execute()
-        if comm_r.data:
-            c = comm_r.data[0]
-            st.markdown(
-                f"<span style='color:#16c784'>●</span> **{c['name']}**",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"{(c.get('platform') or '').capitalize()} · {c.get('total_members', 0):,} members")
-    except Exception:
-        pass
+    _sidebar_comm = get_community()
+    if _sidebar_comm:
+        st.markdown(
+            f"<span style='color:#16c784'>●</span> **{_sidebar_comm['name']}**",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"{(_sidebar_comm.get('platform') or '').capitalize()} · "
+            f"{_sidebar_comm.get('total_members', 0):,} members"
+        )
     user = get_current_user()
     st.caption(f"📧 {user.get('email', '')}")
     st.divider()

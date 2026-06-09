@@ -3,25 +3,11 @@ import pandas as pd
 import time
 import random
 from utils.supabase_client import get_client
+from utils.community import get_community
 from components.auth import get_current_user
 
 supabase = get_client()
 user = get_current_user()
-
-
-def get_community():
-    uid = user.get("id")
-    if not uid:
-        return None
-    try:
-        r = supabase.table("communities").select(
-            "id, name, platform, total_members, platform_group_id, subscription_tier, matchmaker_config"
-        ).eq("admin_auth_id", uid).limit(1).execute()
-        return r.data[0] if r.data else None
-    except Exception:
-        return None
-
-
 community = get_community()
 
 if not community:
@@ -84,6 +70,7 @@ with tabs[0]:
             supabase.table("communities").update(
                 {"matchmaker_config": new_mc}
             ).eq("id", cid).execute()
+            get_community(bust=True)
             st.success(f"บันทึก Time Window = {new_time_window} นาที สำเร็จ!")
             st.rerun()
         except Exception as e:
@@ -204,6 +191,7 @@ with tabs[4]:
         if st.button("💾 บันทึก", type="primary", use_container_width=True, key="save_profile"):
             try:
                 supabase.table("communities").update({"name": new_name}).eq("id", cid).execute()
+                get_community(bust=True)
                 st.success("บันทึกแล้ว")
                 st.rerun()
             except Exception as e:

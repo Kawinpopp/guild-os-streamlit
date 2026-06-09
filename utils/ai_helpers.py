@@ -150,6 +150,68 @@ threshold = {threshold} (score เกินนี้ = action เป็น remov
     return _parse_json(message.content[0].text)
 
 
+def run_community_matchmaker(community_id: str, supabase_client) -> tuple[int, int]:
+    """Run AI matchmaking for all skill-card holders in a community.
+
+    Returns (matched_count, error_count).
+    Replicates the Next.js /api/ai/match logic: fetch skill_cards, skip
+    members that already have a pending match, call the AI service, then
+    insert new rows into the matches table.
+    """
+    try:
+        sc_r = supabase_client.table("skill_cards").select(
+            "id, user_id, game, role, play_style, time_vector, style_vector"
+        ).eq("community_id", community_id).execute()
+        skill_cards = sc_r.data or []
+    except Exception:
+        skill_cards = []
+
+    if len(skill_cards) < 2:
+        return 0, 0
+
+    try:
+        existing_r = supabase_client.table("matches").select("requester_id").eq(
+            "community_id", community_id
+        ).eq("status", "pending").execute()
+        already_pending = {r["requester_id"] for r in (existing_r.data or [])}
+    except Exception:
+        already_pending = set()
+
+    matched = 0
+    errors = 0
+
+    for requester in skill_cards:
+        if requester["user_id"] in already_pending:
+            continue
+        candidates = [c for c in skill_cards if c["user_id"] != requester["user_id"]]
+        result = _call_ai_api("match", {
+            "community_id": community_id,
+            "requester": requester,
+            "candidates": candidates,
+        })
+        if not result:
+            errors += 1
+            continue
+        try:
+            supabase_client.table("matches").insert({
+                "community_id": community_id,
+                "requester_id": requester["user_id"],
+                "matched_user_id": result.get("matched_user_id"),
+                "game": result.get("game") or requester.get("game"),
+                "match_score": result.get("match_score", 0),
+                "game_score":  result.get("game_score", 0),
+                "time_score":  result.get("time_score", 0),
+                "role_score":  result.get("role_score", 0),
+                "style_score": result.get("style_score", 0),
+                "status": "pending",
+            }).execute()
+            matched += 1
+        except Exception:
+            errors += 1
+
+    return matched, errors
+
+
 def _parse_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):

@@ -1,25 +1,9 @@
 import streamlit as st
 import pandas as pd
 from utils.supabase_client import get_client
-from components.auth import get_current_user
+from utils.community import get_community
 
 supabase = get_client()
-user = get_current_user()
-
-
-def get_community():
-    uid = user.get("id")
-    if not uid:
-        return None
-    try:
-        r = supabase.table("communities").select(
-            "id, name, platform, total_members"
-        ).eq("admin_auth_id", uid).limit(1).execute()
-        return r.data[0] if r.data else None
-    except Exception:
-        return None
-
-
 community = get_community()
 cid = community["id"] if community else None
 today_str = pd.Timestamp.now(tz="UTC").normalize().isoformat()

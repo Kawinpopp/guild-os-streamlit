@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from utils.supabase_client import get_client
+from utils.ai_helpers import run_community_matchmaker
 from components.auth import get_current_user
 
 supabase = get_client()
@@ -22,11 +23,24 @@ community = get_community()
 cid = community["id"] if community else None
 
 # ── Header ────────────────────────────────────────────────────────────────────
-h_col, btn_col = st.columns([5, 1])
+h_col, run_col, btn_col = st.columns([4, 1, 1])
 h_col.title("Smart Matchmaker")
 h_col.caption("ผลการจับคู่จาก AI Matchmaker — score คำนวณจาก game / time / role / style")
 if btn_col.button("🔄 Refresh", use_container_width=True):
     st.rerun()
+if run_col.button("⚔️ Run", type="primary", use_container_width=True, help="รัน AI Matchmaker สำหรับสมาชิกทุกคนในชุมชน"):
+    if not cid:
+        st.warning("ไม่พบ community")
+    else:
+        with st.spinner("กำลังรัน AI Matchmaker..."):
+            matched, errors = run_community_matchmaker(cid, supabase)
+        if matched > 0:
+            st.success(f"สร้างการจับคู่ใหม่ {matched} คู่ สำเร็จ")
+        elif errors:
+            st.warning("รัน Matchmaker แล้ว แต่ไม่มีคู่ใหม่ (อาจมี pending อยู่แล้ว หรือ Skill Cards ไม่เพียงพอ)")
+        else:
+            st.info("ไม่มีสมาชิกที่มี Skill Card เพียงพอสำหรับการจับคู่")
+        st.rerun()
 
 # ── Fetch matches ─────────────────────────────────────────────────────────────
 try:
